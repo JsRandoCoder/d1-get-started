@@ -566,6 +566,8 @@ export default {
   }
 };
 
+// Paste this by REPLACING your existing `export class Scheduler ...` class entirely.
+
 export class Scheduler implements DurableObject {
   private state: DurableObjectState;
   private env: Env;
@@ -580,11 +582,16 @@ export class Scheduler implements DurableObject {
     const pathname = normalizePath(url.pathname);
 
     if (request.method === "POST" && pathname === "/enqueue") {
-      await this.state.setAlarm(Date.now() + 1);
+      // Run immediately (fixes “stuck queued” even if alarms lag)
+      await this.reclaimStuckRunning(5 * 60_000);
+      await this.processDueTasks(3);
+
+      // Schedule follow-up if needed
+      await this.scheduleNextWake();
       return new Response("ok");
     }
 
-    // Optional: poke test
+    // Optional: keep your poke test
     if (request.method === "POST" && pathname === "/poke") {
       const count = ((await this.state.storage.get<number>("count")) ?? 0) + 1;
       await this.state.storage.put("count", count);
@@ -597,12 +604,56 @@ export class Scheduler implements DurableObject {
   async alarm(): Promise<void> {
     await this.reclaimStuckRunning(5 * 60_000);
     await this.processDueTasks(3);
+    await this.scheduleNextWake();
+  }
 
+  private async scheduleNextWake(): Promise<void> {
+    // If there’s still “due now” work, wake again soon.
+    const now = nowIso();
+    const due = await dbFirst<{ one: number }>(
+      this.env.DB,
+      `SELECT 1 as one
+       FROM ara_tasks
+       WHERE status IN ('queued','retry')
+         AND (retry_at IS NULL OR retry_at <= ?)
+       LIMIT 1`,
+      [now]
+    );
+
+    if (due) {
+      await this.state.setAlarm(Date.now() + 1000);
+      return;
+    }
+
+    // Otherwise schedule at the next retry time (if any)
     const next = await this.nextRetryAt();
     if (next) {
       const ms = Math.max(1000, next.getTime() - Date.now());
       await this.state.setAlarm(Date.now() + ms);
     }
+  }
+
+  private async nextRetryAt(): Promise<Date | null> {
+    const row = await dbFirst<{ retry_at: string }>(
+      this.env.DB,
+      `SELECT retry_at
+       FROM ara_tasks
+       WHERE status IN ('retry')
+         AND retry_at IS NOT NULL
+       ORDER BY retry_at ASC
+       LIMIT 1`
+    );
+    if (!row?.retry_at) return null;
+    const d = new Date(row.retry_at);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  private backoffMs(attempt: number): number {
+    const base = 5000;
+    const cap = 5 * 60_000;
+    const exp = Math.min(cap, base * Math.pow(2, Math.max(0, attempt - 1)));
+    const jitter = Math.floor(Math.random() * 750);
+    return Math.min(cap, exp + jitter);
   }
 
   private async reclaimStuckRunning(timeoutMs: number): Promise<void> {
@@ -638,31 +689,9 @@ export class Scheduler implements DurableObject {
     }
   }
 
-  private async nextRetryAt(): Promise<Date | null> {
-    const row = await dbFirst<{ retry_at: string }>(
-      this.env.DB,
-      `SELECT retry_at
-       FROM ara_tasks
-       WHERE status IN ('queued','retry')
-         AND retry_at IS NOT NULL
-       ORDER BY retry_at ASC
-       LIMIT 1`
-    );
-    if (!row?.retry_at) return null;
-    const d = new Date(row.retry_at);
-    return isNaN(d.getTime()) ? null : d;
-  }
-
-  private backoffMs(attempt: number): number {
-    const base = 5000;
-    const cap = 5 * 60_000;
-    const exp = Math.min(cap, base * Math.pow(2, Math.max(0, attempt - 1)));
-    const jitter = Math.floor(Math.random() * 750);
-    return Math.min(cap, exp + jitter);
-  }
-
   private async claimBatch(limit: number): Promise<TaskRow[]> {
     const now = nowIso();
+
     const due = await dbAll<TaskRow>(
       this.env.DB,
       `SELECT id, status, prompt, result, error, attempts, max_attempts, retry_at, created_at, updated_at
@@ -699,7 +728,6 @@ export class Scheduler implements DurableObject {
     for (const task of batch) {
       const latest = await getTask(this.env.DB, task.id);
       if (!latest || latest.status !== "running") continue;
-      if (latest.status === "canceled") continue;
 
       try {
         await emitEvent(this.env.DB, latest.id, "executor_start");
@@ -731,7 +759,11 @@ export class Scheduler implements DurableObject {
             `UPDATE ara_tasks SET status='retry', error=?, retry_at=?, updated_at=? WHERE id=?`,
             [msg, retryAt, nowIso(), latest.id]
           );
-          await emitEvent(this.env.DB, latest.id, "retry_scheduled", { error: msg, retry_at: retryAt, attempt: attempts });
+          await emitEvent(this.env.DB, latest.id, "retry_scheduled", {
+            error: msg,
+            retry_at: retryAt,
+            attempt: attempts
+          });
         }
       }
     }
