@@ -8,6 +8,11 @@ bindings = [
   { name = "SCHEDULER", class_name = "Scheduler" }
 ]
 
+[[d1_databases]]
+binding = "DB"                 # makes it available as env.DB in code
+database_name = "ara_db"        # your D1 database name
+database_id = "bf4e5d7b-2b5a-4b83-925f-1871130027ce"   # your D1 database UUID
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["Scheduler"]
