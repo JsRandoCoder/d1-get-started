@@ -1,15 +1,24 @@
 // src/index.ts
 export interface Env {
   DB: D1Database;
-  SCHEDULER: DurableObjectNamespace; // <- Durable Object binding (add in dashboard + wrangler.toml)
+  SCHEDULER: DurableObjectNamespace;
+}
+
+function normalizePath(pathname: string): string {
+  if (pathname.length > 1 && pathname.endsWith("/")) return pathname.slice(0, -1);
+  return pathname;
 }
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    const pathname = normalizePath(url.pathname);
 
-    // Your existing endpoint
-    if (url.pathname === "/api/beverages") {
+    if (pathname === "/api/health") {
+      return Response.json({ ok: true, ts: new Date().toISOString() });
+    }
+
+    if (pathname === "/api/beverages") {
       const { results } = await env.DB.prepare(
         "SELECT * FROM Customers WHERE CompanyName = ?"
       )
@@ -19,8 +28,7 @@ export default {
       return Response.json(results);
     }
 
-    // A simple endpoint to confirm Durable Object is wired
-    if (url.pathname === "/api/scheduler/poke") {
+    if (pathname === "/api/scheduler/poke") {
       const id = env.SCHEDULER.idFromName("singleton");
       const stub = env.SCHEDULER.get(id);
       const res = await stub.fetch("https://scheduler/poke", { method: "POST" });
@@ -28,7 +36,7 @@ export default {
     }
 
     return new Response(
-      "Call /api/beverages or /api/scheduler/poke",
+      "Call /api/health or /api/beverages or /api/scheduler/poke",
       { headers: { "content-type": "text/plain; charset=utf-8" } }
     );
   },
@@ -43,8 +51,9 @@ export class Scheduler implements DurableObject {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    const pathname = url.pathname.endsWith("/") && url.pathname !== "/" ? url.pathname.slice(0, -1) : url.pathname;
 
-    if (request.method === "POST" && url.pathname === "/poke") {
+    if (request.method === "POST" && pathname === "/poke") {
       const count = ((await this.state.storage.get<number>("count")) ?? 0) + 1;
       await this.state.storage.put("count", count);
       return new Response(`Scheduler DO ok. count=${count}`);
