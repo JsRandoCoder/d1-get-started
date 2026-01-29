@@ -1,4 +1,5 @@
-name = "your-worker-name"
+# wrangler.toml
+name = 'd1-get-started'
 main = "src/index.ts"
 compatibility_date = "2025-12-16"
 
