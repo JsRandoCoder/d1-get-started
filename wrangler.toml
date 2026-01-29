@@ -1,0 +1,12 @@
+name = "your-worker-name"
+main = "src/index.ts"
+compatibility_date = "2025-12-16"
+
+[durable_objects]
+bindings = [
+  { name = "SCHEDULER", class_name = "Scheduler" }
+]
+
+[[migrations]]
+tag = "v1"
+new_classes = ["Scheduler"]
